@@ -1,187 +1,183 @@
 from typing import Optional, List
-from fastapi import HTTPException, Header, status
-from app.models.todo_model import TodoState, TodoModel
+from fastapi import HTTPException, status
+from app.models.todo_model import TodoState, TodoModel, LabelModel
 from app.database.database import engine
 from sqlalchemy.orm import Session
+from sqlalchemy import update, delete, insert
 
 
-def authCheck(X_movitronics: str = Header(...)):
-    if X_movitronics != "movietronics_secret_api_key":
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-
-def format_labels_for_db(labels: List[str]):
-    return " - ".join(labels) if labels else "-"
-
-
-def format_labels_for_response(labels: str):
-    return (
-        [label.strip() for label in labels.split("-")]
-        if "-" in labels
-        else [labels.strip()]
-    )
-
-
-# ✅
+# ✅ ✅ ✅
 def get_todo(
     todo_id: int,
-    X_movitronics: str = Header(...),
     session: Session = Session(bind=engine, expire_on_commit=False),
 ):
-    authCheck(X_movitronics)
     todo = session.query(TodoModel).get(todo_id)
-
-    session.close()
 
     if not todo:
         raise HTTPException(
-            status_code=404, detail=f"Todo item with id {todo_id} not found"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Todo item with id {todo_id} not found",
         )
-
-    if todo.labels is not None and todo.labels != "-":
-        todo.labels = format_labels_for_response(todo.labels)
-    else:
-        todo.labels = []
 
     return todo
 
 
-# ✅
+# ✅ ✅ ✅
 def get_todos(
     state: Optional[str] = None,
     due_date: Optional[str] = None,
     labels: List[str] = None,
-    X_movitronics: str = Header(...),
     session: Session = Session(bind=engine, expire_on_commit=False),
 ):
-    authCheck(X_movitronics)
-    todo_list = session.query(TodoModel).all()
-
-    session.close()
-    # No se hace mas!!!!
-    for todo in todo_list:
-        if todo.labels is not None and todo.labels != "-":
-            todo.labels = format_labels_for_response(todo.labels)
-        else:
-            todo.labels = []
+    todo_filter_by = session.query(TodoModel)
 
     if state:
-        todo_list = [todo for todo in todo_list if todo.state == state]
+        todo_filter_by = todo_filter_by.filter_by(state=state)
     if due_date:
-        todo_list = [todo for todo in todo_list if todo.due_date == due_date]
+        todo_filter_by = todo_filter_by.filter_by(due_date=due_date)
     if labels:
-        todo_list = [
-            todo for todo in todo_list if any(label in todo.labels for label in labels)
-        ]
-
-    if len(todo_list) == 0:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="No todos found"
+        todo_filter_by = todo_filter_by.filter(
+            TodoModel.labels.any(LabelModel.name.in_(labels))
         )
-    return todo_list
+
+    return todo_filter_by
 
 
-# ✅
+# ✅ ✅ ✅
 def create_todo(
     todo_data: dict,
-    X_movitronics: str = Header(...),
     session: Session = Session(bind=engine, expire_on_commit=False),
 ):
-    authCheck(X_movitronics)
-    todo_to_create = TodoModel(
+    labels_to_add = []
+
+    for label_data in todo_data.labels:
+        existing_label = (
+            session.query(LabelModel).filter_by(name=label_data.name).one_or_none()
+        )
+
+        print(existing_label)
+        if existing_label:
+            labels_to_add.append(existing_label)
+        else:
+            stmt = insert(LabelModel).values(name=label_data.name)
+            session.execute(stmt)
+            session.commit()
+            retrieved_label = (
+                session.query(LabelModel).order_by(LabelModel.id.desc()).first()
+            )
+            labels_to_add.append(retrieved_label)
+
+    create_todo = TodoModel(
         name=todo_data.name,
         description=todo_data.description,
         due_date=todo_data.due_date,
-        state=TodoState.pending,
-        labels="-",
     )
+    create_todo.labels.extend(labels_to_add)
 
-    session.add(todo_to_create)
+    session.add(create_todo)
     session.commit()
-    retrieved_todo = session.query(TodoModel).order_by(TodoModel.id.desc()).first()
+    session.refresh(create_todo)
 
-    session.close()
-    if retrieved_todo:
-        retrieved_todo.labels = []
-
-    return retrieved_todo
+    return create_todo
 
 
-# ✅
+# ✅ ✅ ✅
 def update_todo(
     todo_id: int,
     update_data: dict,
-    X_movitronics: str = Header(...),
     session: Session = Session(bind=engine, expire_on_commit=False),
 ):
-    authCheck(X_movitronics)
-
     todo_to_update = session.query(TodoModel).get(todo_id)
-
-    if todo_to_update:
-        todo_to_update.description = update_data.description
-        todo_to_update.due_date = update_data.due_date
-        todo_to_update.state = update_data.state
-        todo_to_update.labels = format_labels_for_db(update_data.labels)
-        session.commit()
-        session.refresh(todo_to_update)
-        session.close()
 
     if not todo_to_update:
         raise HTTPException(
-            status_code=404, detail=f"Todo item with id {todo_id} not found"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Todo item with id {todo_id} not found",
         )
 
-    if todo_to_update.labels is not None and todo_to_update.labels != "-":
-        todo_to_update.labels = format_labels_for_response(todo_to_update.labels)
-    else:
-        todo_to_update.labels = []
+    if update_data.state is not None:
+        todo_to_update.state = update_data.state
+
+    if update_data.description is not None:
+        todo_to_update.description = update_data.description
+
+    if update_data.due_date is not None:
+        todo_to_update.due_date = update_data.due_date
+
+    if update_data.labels is not None:
+        updated_labels = []
+        for label_data in update_data.labels:
+            existing_label = (
+                session.query(LabelModel).filter_by(name=label_data.name).one_or_none()
+            )
+
+            if existing_label:
+                updated_labels.append(existing_label)
+            else:
+                stmt = insert(LabelModel).values(name=label_data.name)
+                session.execute(stmt)
+                session.commit()
+                retrieved_label = (
+                    session.query(LabelModel).order_by(LabelModel.id.desc()).first()
+                )
+                updated_labels.append(retrieved_label)
+        todo_to_update.labels = updated_labels
+
+    session.commit()
+    session.refresh(todo_to_update)
 
     return todo_to_update
 
 
-# ✅
+# ✅ ✅ ✅
 def complete_todo(
     todo_id: int,
-    X_movitronics: str = Header(...),
     session: Session = Session(bind=engine, expire_on_commit=False),
 ):
-    authCheck(X_movitronics)
-
     todo_to_complete = session.query(TodoModel).get(todo_id)
-
-    if todo_to_complete:
-        if todo_to_complete.state == TodoState.completed:
-            raise HTTPException(
-                status_code=400, detail="The todo item is already completed"
-            )
-        todo_to_complete.state = TodoState.completed
-        session.commit()
-        session.refresh(todo_to_complete)
-        session.close()
 
     if not todo_to_complete:
         raise HTTPException(
-            status_code=404, detail=f"Todo item with id {todo_id} not found"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Todo item with id {todo_id} not found",
         )
+
+    if todo_to_complete.state == TodoState.completed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The todo item is already completed",
+        )
+
+    stmt = (
+        update(TodoModel)
+        .where(TodoModel.id == todo_id)
+        .values(
+            state=TodoState.completed,
+        )
+    )
+    session.execute(stmt)
+    session.commit()
+    session.refresh(todo_to_complete)
 
     return f"Todo with id {todo_id} completed successfully."
 
 
-# ✅
+# ✅ ✅ ✅
 def delete_todo(
     todo_id: int,
-    X_movitronics: str = Header(...),
     session: Session = Session(bind=engine, expire_on_commit=False),
 ):
-    authCheck(X_movitronics)
-
     todo_to_delete = session.query(TodoModel).get(todo_id)
 
     if todo_to_delete:
-        session.delete(todo_to_delete)
+        todo_to_delete.labels.clear()
+        stmt = delete(TodoModel).where(TodoModel.id == todo_id)
+        session.execute(stmt)
         session.commit()
     else:
-        raise HTTPException(status_code=404, detail=f"Todo with id {todo_id} not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Todo with id {todo_id} not found",
+        )
 
     return f"Todo with id {todo_id} deleted successfully."
